@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "Society Management",
+    "slug": "society-management",
+    "version": "0.0.0",
+    "orientation": "portrait",
+    "scheme": "society-management",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": { "supportsTablet": true },
+    "android": {}
+  }
+}

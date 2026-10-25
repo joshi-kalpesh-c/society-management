@@ -1,0 +1,25 @@
+{
+  "name": "society-management",
+  "private": true,
+  "version": "0.0.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev:api": "pnpm --filter @society/api start:dev",
+    "dev:web": "pnpm --filter @society/web dev",
+    "dev:mobile": "pnpm --filter @society/mobile start",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "build": "pnpm -r build"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.15.0",
+    "eslint": "9.15.0",
+    "typescript": "5.6.3",
+    "typescript-eslint": "8.15.0",
+    "vitest": "2.1.8"
+  },
+  "packageManager": "pnpm@12.4.2"
+}

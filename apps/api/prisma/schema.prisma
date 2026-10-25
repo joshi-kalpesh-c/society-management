@@ -1,0 +1,500 @@
+// Conceptual schema from DATABASE.md — review constraints before first migration.
+// Conventions: UUID ids, UTC timestamps, integer paise, every society-owned
+// row carries society_id, append-only financial/audit records.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Identity & tenancy ----------
+
+model Society {
+  id        String   @id @default(uuid())
+  name      String
+  timezone  String   @default("Asia/Kolkata")
+  status    String   @default("active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  memberships SocietyMembership[]
+  buildings   Building[]
+  settings    SocietySetting?
+
+  @@map("societies")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  authSubject  String?  @unique @map("auth_subject") // set once auth provider is decided
+  email        String?  @unique // placeholder credential sign-in
+  passwordHash String?  @map("password_hash")
+  displayName  String   @map("display_name")
+  phone        String?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  memberships       SocietyMembership[]
+  flatMemberships   FlatMembership[]
+  devices           Device[]
+
+  @@map("users")
+}
+
+model SocietyMembership {
+  id        String   @id @default(uuid())
+  societyId String   @map("society_id")
+  userId    String   @map("user_id")
+  role      String   // admin | resident | security
+  status    String   @default("active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  society Society @relation(fields: [societyId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([societyId, userId, role])
+  @@map("society_memberships")
+}
+
+model Building {
+  id        String @id @default(uuid())
+  societyId String @map("society_id")
+  name      String
+
+  society Society @relation(fields: [societyId], references: [id])
+  flats   Flat[]
+
+  @@map("buildings")
+}
+
+model Flat {
+  id         String @id @default(uuid())
+  societyId  String @map("society_id")
+  buildingId String @map("building_id")
+  flatNumber String @map("flat_number")
+  status     String @default("active")
+
+  building Building         @relation(fields: [buildingId], references: [id])
+  members  FlatMembership[]
+
+  @@unique([societyId, buildingId, flatNumber])
+  @@index([societyId])
+  @@map("flats")
+}
+
+model FlatMembership {
+  id                  String  @id @default(uuid())
+  societyId           String  @map("society_id")
+  flatId              String  @map("flat_id")
+  userId              String  @map("user_id")
+  canApproveVisitors  Boolean @default(true) @map("can_approve_visitors")
+  status              String  @default("active")
+
+  flat Flat @relation(fields: [flatId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([flatId, userId])
+  @@index([societyId])
+  @@map("flat_memberships")
+}
+
+model SocietySetting {
+  societyId                String @id @map("society_id")
+  visitorTimeoutSeconds    Int    @default(120) @map("visitor_timeout_seconds")
+  securityFallbackEnabled  Boolean @default(true) @map("security_fallback_enabled")
+  version                  Int    @default(1)
+  updatedAt                DateTime @updatedAt @map("updated_at")
+
+  society Society @relation(fields: [societyId], references: [id])
+
+  @@map("society_settings")
+}
+
+model PaymentDestination {
+  id          String    @id @default(uuid())
+  societyId   String    @map("society_id")
+  payeeUpiId  String    @map("payee_upi_id")
+  payeeName   String    @map("payee_name")
+  qrAssetId   String?   @map("qr_asset_id")
+  activeFrom  DateTime  @default(now()) @map("active_from")
+  activeUntil DateTime? @map("active_until")
+
+  @@index([societyId])
+  @@map("payment_destinations")
+}
+
+model Device {
+  id        String  @id @default(uuid())
+  societyId String  @map("society_id")
+  userId    String  @map("user_id")
+  token     String
+  platform  String
+  enabled   Boolean @default(true)
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([societyId, token])
+  @@map("devices")
+}
+
+// ---------- Maintenance ----------
+
+model MaintenancePolicy {
+  id             String  @id @default(uuid())
+  societyId      String  @map("society_id")
+  version        Int
+  amountPaise    Int     @map("amount_paise")
+  lateFeeType    String  @map("late_fee_type") // fixed | percentage
+  dailyFixedPaise Int?   @map("daily_fixed_paise")
+  dailyRateBps   Int?    @map("daily_rate_bps") // basis points; confirm representation
+  dailyCapPaise  Int?    @map("daily_cap_paise")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@unique([societyId, version])
+  @@map("maintenance_policies")
+}
+
+model MaintenanceRun {
+  id             String   @id @default(uuid())
+  societyId      String   @map("society_id")
+  period         String   // YYYY-MM
+  idempotencyKey String   @map("idempotency_key")
+  status         String   @default("pending")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@unique([societyId, idempotencyKey])
+  @@map("maintenance_runs")
+}
+
+model MaintenanceBill {
+  id             String   @id @default(uuid())
+  societyId      String   @map("society_id")
+  flatId         String   @map("flat_id")
+  period         String   // YYYY-MM
+  principalPaise Int      @map("principal_paise")
+  dueDate        DateTime @map("due_date") @db.Date
+  policySnapshot Json     @map("policy_snapshot")
+  status         String   @default("issued")
+  // Final settlement breakdown persisted at settlement time
+  settledPrincipalPaise Int?     @map("settled_principal_paise")
+  settledLateFeePaise   Int?     @map("settled_late_fee_paise")
+  settledCalcDate       DateTime? @map("settled_calc_date") @db.Date
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@unique([societyId, flatId, period])
+  @@index([societyId, flatId, period])
+  @@map("maintenance_bills")
+}
+
+// ---------- Campaigns ----------
+
+model Campaign {
+  id                 String   @id @default(uuid())
+  societyId          String   @map("society_id")
+  title              String
+  description        String?
+  mode               String   // voluntary | minimum | fixed
+  requiredAmountPaise Int?    @map("required_amount_paise")
+  startDate          DateTime @map("start_date") @db.Date
+  dueDate            DateTime @map("due_date") @db.Date
+  status             String   @default("draft")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  obligations CampaignObligation[]
+
+  @@index([societyId])
+  @@map("campaigns")
+}
+
+model CampaignObligation {
+  id                        String   @id @default(uuid())
+  societyId                 String   @map("society_id")
+  campaignId                String   @map("campaign_id")
+  flatId                    String   @map("flat_id")
+  requiredAmountSnapshotPaise Int?    @map("required_amount_snapshot_paise")
+
+  campaign Campaign @relation(fields: [campaignId], references: [id])
+
+  @@unique([campaignId, flatId])
+  @@index([societyId, campaignId, flatId])
+  @@map("campaign_obligations")
+}
+
+model ReminderRule {
+  id        String  @id @default(uuid())
+  societyId String  @map("society_id")
+  campaignId String @map("campaign_id")
+  schedule  Json
+  channels  Json
+  enabled   Boolean @default(true)
+  version   Int     @default(1)
+
+  occurrences ReminderOccurrence[]
+
+  @@map("reminder_rules")
+}
+
+model ReminderOccurrence {
+  id          String   @id @default(uuid())
+  societyId   String   @map("society_id")
+  ruleId      String   @map("rule_id")
+  flatId      String   @map("flat_id")
+  scheduledAt DateTime @map("scheduled_at")
+  outcome     String?
+
+  rule ReminderRule @relation(fields: [ruleId], references: [id])
+
+  @@unique([ruleId, flatId, scheduledAt])
+  @@map("reminder_occurrences")
+}
+
+// ---------- Payment claims, settlement, receipts ----------
+
+model PaymentClaim {
+  id                  String    @id @default(uuid())
+  societyId           String    @map("society_id")
+  flatId              String    @map("flat_id")
+  submittedBy         String    @map("submitted_by")
+  maintenanceBillId   String?   @map("maintenance_bill_id")
+  campaignId          String?   @map("campaign_id")
+  claimedAmountPaise  Int       @map("claimed_amount_paise")
+  transactionReference String   @map("transaction_reference")
+  claimedPaidAt       DateTime  @map("claimed_paid_at")
+  destinationId       String?   @map("destination_id")
+  evidenceAssetId     String?   @map("evidence_asset_id")
+  status              String    @default("pending")
+  reviewedBy          String?   @map("reviewed_by")
+  reviewedAt          DateTime? @map("reviewed_at")
+  reviewReason        String?   @map("review_reason")
+  createdAt           DateTime  @default(now()) @map("created_at")
+
+  verifiedPayment VerifiedPayment?
+
+  @@index([societyId, status])
+  @@index([societyId, flatId])
+  // TODO: check exactly one of maintenanceBillId/campaignId set (enforce in migration SQL)
+  @@map("payment_claims")
+}
+
+model VerifiedPayment {
+  id                  String   @id @default(uuid())
+  societyId           String   @map("society_id")
+  claimId             String   @unique @map("claim_id")
+  verifiedAmountPaise Int      @map("verified_amount_paise")
+  effectivePaidAt     DateTime @map("effective_paid_at")
+  verifierId          String   @map("verifier_id")
+  bankReference       String?  @map("bank_reference")
+  destinationSnapshot Json     @map("destination_snapshot")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  claim       PaymentClaim          @relation(fields: [claimId], references: [id])
+  allocations SettlementAllocation[]
+  receipt     Receipt?
+
+  @@map("verified_payments")
+}
+
+model SettlementAllocation {
+  id                   String  @id @default(uuid())
+  societyId            String  @map("society_id")
+  paymentId            String  @map("payment_id")
+  maintenanceBillId    String? @map("maintenance_bill_id")
+  campaignObligationId String? @map("campaign_obligation_id")
+  voluntaryCampaignId  String? @map("voluntary_campaign_id")
+  principalPaise       Int     @map("principal_paise")
+  lateFeePaise         Int     @default(0) @map("late_fee_paise")
+
+  payment VerifiedPayment @relation(fields: [paymentId], references: [id])
+
+  // TODO: check exactly one target set (migration SQL)
+  @@map("settlement_allocations")
+}
+
+model Receipt {
+  id               String   @id @default(uuid())
+  societyId        String   @map("society_id")
+  paymentId        String   @unique @map("payment_id")
+  receiptNumber    String   @map("receipt_number")
+  issuedAt         DateTime @default(now()) @map("issued_at")
+  snapshot         Json
+  assetId          String?  @map("asset_id")
+  generationStatus String   @default("pending") @map("generation_status")
+
+  payment VerifiedPayment @relation(fields: [paymentId], references: [id])
+
+  @@unique([societyId, receiptNumber])
+  @@map("receipts")
+}
+
+model ReceiptSequence {
+  societyId       String @map("society_id")
+  numberingPeriod String @map("numbering_period")
+  nextNumber      Int    @default(1) @map("next_number")
+
+  @@id([societyId, numberingPeriod])
+  @@map("receipt_sequences")
+}
+
+model ReconciliationException {
+  id                 String  @id @default(uuid())
+  societyId          String  @map("society_id")
+  claimId            String  @map("claim_id")
+  reason             String
+  state              String  @default("open")
+  resolutionMetadata Json?   @map("resolution_metadata")
+
+  @@map("reconciliation_exceptions")
+}
+
+// ---------- Notices, visitors, operational ----------
+
+model Notice {
+  id          String    @id @default(uuid())
+  societyId   String    @map("society_id")
+  title       String
+  body        String
+  status      String    @default("draft")
+  authorId    String    @map("author_id")
+  publishedAt DateTime? @map("published_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  targets NoticeTarget[]
+
+  @@index([societyId, status])
+  @@map("notices")
+}
+
+model NoticeTarget {
+  id         String @id @default(uuid())
+  societyId  String @map("society_id")
+  noticeId   String @map("notice_id")
+  scope      String // society | building | flat
+  targetId   String? @map("target_id")
+
+  notice Notice @relation(fields: [noticeId], references: [id])
+
+  @@map("notice_targets")
+}
+
+model Notification {
+  id          String    @id @default(uuid())
+  societyId   String    @map("society_id")
+  userId      String    @map("user_id")
+  category    String
+  subjectRef  String?   @map("subject_ref")
+  readAt      DateTime? @map("read_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  attempts DeliveryAttempt[]
+
+  @@index([societyId, userId])
+  @@map("notifications")
+}
+
+model DeliveryAttempt {
+  id             String    @id @default(uuid())
+  societyId      String    @map("society_id")
+  notificationId String    @map("notification_id")
+  channel        String
+  providerRef    String?   @map("provider_ref")
+  state          String    @default("pending")
+  retryAt        DateTime? @map("retry_at")
+
+  notification Notification @relation(fields: [notificationId], references: [id])
+
+  @@map("delivery_attempts")
+}
+
+model VisitorRequest {
+  id                 String   @id @default(uuid())
+  societyId          String   @map("society_id")
+  flatId             String   @map("flat_id")
+  visitorName        String   @map("visitor_name")
+  purpose            String?
+  visitorContact     String?  @map("visitor_contact")
+  requestedBy        String   @map("requested_by")
+  state              String   @default("pending")
+  requestedAt        DateTime @default(now()) @map("requested_at")
+  fallbackEligibleAt DateTime @map("fallback_eligible_at")
+  settingsSnapshot   Json     @map("settings_snapshot")
+
+  decisions VisitorDecision[]
+  movement  VisitorMovement?
+
+  @@index([societyId, state, flatId, requestedAt])
+  @@map("visitor_requests")
+}
+
+model VisitorDecision {
+  id         String   @id @default(uuid())
+  societyId  String   @map("society_id")
+  requestId  String   @map("request_id")
+  actorId    String   @map("actor_id")
+  actorRole  String   @map("actor_role")
+  decision   String   // approve | reject | security_approve
+  reason     String?
+  decidedAt  DateTime @default(now()) @map("decided_at")
+
+  request VisitorRequest @relation(fields: [requestId], references: [id])
+
+  @@map("visitor_decisions")
+}
+
+model VisitorMovement {
+  requestId     String    @id @map("request_id")
+  societyId     String    @map("society_id")
+  checkedInAt   DateTime? @map("checked_in_at")
+  checkedInBy   String?   @map("checked_in_by")
+  checkedOutAt  DateTime? @map("checked_out_at")
+  checkedOutBy  String?   @map("checked_out_by")
+
+  request VisitorRequest @relation(fields: [requestId], references: [id])
+
+  @@map("visitor_movements")
+}
+
+model Asset {
+  id          String   @id @default(uuid())
+  societyId   String   @map("society_id")
+  purpose     String   // payment_qr | claim_evidence | receipt_pdf
+  storageKey  String   @map("storage_key")
+  contentType String   @map("content_type")
+  size        Int
+  uploadedBy  String   @map("uploaded_by")
+  retentionUntil DateTime? @map("retention_until")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([societyId])
+  @@map("assets")
+}
+
+model AuditEvent {
+  id         String   @id @default(uuid())
+  societyId  String   @map("society_id")
+  actorId    String   @map("actor_id")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([societyId, createdAt])
+  @@map("audit_events")
+}
+
+model OutboxEvent {
+  id             String   @id @default(uuid())
+  societyId      String   @map("society_id")
+  eventType      String   @map("event_type")
+  payload        Json
+  idempotencyKey String?  @map("idempotency_key")
+  state          String   @default("pending")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([state, createdAt])
+  @@map("outbox_events")
+}
